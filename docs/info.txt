@@ -1,0 +1,71 @@
+The helpdesk-langgraph-agent is hosted on Azure AI Foundry's managed compute — it is not local, and it is not Azure Container Instances or Azure Container Apps or AKS. It is a fully managed, serverless runtime that Foundry runs on your behalf.
+
+Here is exactly what happens under the hood:
+
+Where the agent actually runs
+Foundry Hosted Agent runtime (PaaS — opaque to you)
+When you called create_version_from_code, Foundry:
+
+Stored your zip (main.py + requirements.txt) in its internal storage
+Built a container image using remote_build — it ran pip install -r requirements.txt inside a Python 3.13 base image in the cloud (this is the "REMOTE_BUILD" dependency resolution)
+Manages the image internally — you never see it in your Azure Container Registry, you have no ACR, no ACI, no AKS resource in your subscription for this
+When a request arrives:
+
+Foundry's platform proxy (the rakeshvikhar1-eus2.services.ai.azure.com endpoint) decides to spin up a session
+A session is a running instance of your container — Foundry starts it, assigns it a session ID, polls /readiness, and routes your request to it
+After a period of inactivity the session is torn down (hence the cold-start on the next call)
+What shows in your Azure subscription
+Resource	Exists in your sub?	Notes
+The container image	❌ No	Built and stored by Foundry internally
+Container registry	❌ No	Managed by Foundry
+Container runtime (ACI/AKS)	❌ No	Foundry's own fleet, not your resources
+The AI Foundry project	✅ Yes	rakeshvikhar1-eus2project — this is the control plane
+The agent version record	✅ Yes	Visible via SDK: client.agents.get_version("helpdesk-langgraph-agent", "6")
+Storage for MCP tools	✅ Yes	helpdeskmcpeus2 storage account — you own this
+MCP Function App	✅ Yes	helpdesk-mcp-tools-eus2 — you own this
+Analogy
+It is closest to Azure Container Apps in concept (serverless, scale-to-zero, container-based) but it is an abstraction inside the Foundry service — you do not see, pay for, or manage the underlying compute directly. The pricing is part of your AI Foundry usage, not a separate VM or container bill.
+
+Summary
+Question	Answer
+Local?	No — runs in Azure East US 2
+Your ACI/AKS/ACA?	No — Foundry's managed fleet
+You own the container?	No — Foundry builds and runs it
+You own the code?	Yes — your main.py and requirements.txt
+You own the data layer?	Yes — the Function App and Table Storage are in your subscription
+Cold start?	Yes — sessions spin down when idle; first request after idle takes ~20–30 s
+==============
+Phase 0 — Container Cold Start (once, ~3–5 s)
+When the first request hits, Foundry spins up a Python 3.13 container in East US 2 (image was pre-built by remote_build during deploy). main.py runs:
+
+Creates a placeholder LangGraph graph (no tools) immediately so the HTTP server can start and /readiness can return 200 — this is the trick that prevents session timeout.
+Starts ResponsesHostServer on port 8088 → Foundry's proxy marks the session ready.
+In a background asyncio task, connects to the MCP Function App via tools/list (JSON-RPC over HTTP → SSE). Gets 8 tool definitions back. Swaps the graph to the real ReAct agent with all tools loaded.
+Phase 1 — Request enters (Turn 1)
+On your local machine, orchestrator.py:
+
+Calls DefaultAzureCredential → exchanges your az login cache for an Entra ID Bearer token (scope: cognitiveservices.azure.com)
+HTTPS POSTs to: .../agents/helpdesk-langgraph-agent/endpoint/protocols/openai/responses?api-version=v1
+Also sends api-key header (redundant auth layer) and responses-protocol-version: 1.0.0
+The Foundry Platform Proxy (East US 2 PaaS) validates both headers, matches 1.0.0 against the agent's declared protocol version, and forwards to the container.
+
+Phase 2 — LangGraph ReAct Loop (2–4 iterations per turn)
+Inside the container, the ReAct graph cycles between two nodes:
+
+Iteration 1 — agent node:
+Sends the full message history + system prompt + all 8 tool schemas to gpt-5.4 via POST /openai/v1/chat/completions (same Foundry project endpoint, API key auth). Model decides to call create_ticket.
+
+Iteration 1 — tools node:
+LangChain MCP adapter POSTs tools/call → create_ticket to the MCP Function App (helpdesk-mcp-tools-eus2.azurewebsites.net). The function generates TKT-XXXXXX and writes a row to Azure Table Storage (tickets table, PartitionKey=tickets, RowKey=TKT-XXXXXX). Returns SSE JSON back to the container.
+
+Iteration 2: Same cycle → log_event → writes a row to the events table.
+
+Iteration 3: No more tool calls → gpt-5.4 writes the final reply text. MemorySaver checkpoints the full message thread keyed by response_id (in-process memory).
+
+ResponsesHostServer wraps the output into OpenAI Responses API format → HTTP 200 back through the Foundry proxy → your local orchestrator.
+
+Phase 3 — Turn 2 (multi-turn, warm container)
+Orchestrator sends a second request with previous_response_id set. Foundry routes to the same warm container session. MemorySaver loads the prior thread so gpt-5.4 sees full context. Two tool calls this time: close_ticket (updates the tickets table row, status → closed) and send_notification (currently a log stub, no real email). Final LLM call writes the closing reply.
+
+Storage note
+The Azure Table Storage (helpdeskmcpeus2) is only accessed by the Function App, never directly by the agent container. The container talks to the Function App via MCP; the Function App talks to Table Storage. This keeps the storage key out of the container entirely.
