@@ -29,6 +29,32 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
+
+def _load_kv_secrets() -> None:
+    """Pull secrets from Azure Key Vault into os.environ when KEY_VAULT_URL is set."""
+    kv_url = os.environ.get("KEY_VAULT_URL")
+    if not kv_url:
+        return
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.keyvault.secrets import SecretClient
+        client = SecretClient(vault_url=kv_url, credential=DefaultAzureCredential())
+        mapping = {
+            "AZURE_AI_PROJECT_KEY": "foundry-api-key",
+            "MCP_SERVER_KEY":       "mcp-function-key",
+        }
+        for env_var, secret_name in mapping.items():
+            try:
+                os.environ[env_var] = client.get_secret(secret_name).value
+                log.info("Loaded secret %s from Key Vault", secret_name)
+            except Exception as e:
+                log.warning("Could not load KV secret %s: %s", secret_name, e)
+    except Exception as e:
+        log.warning("Key Vault unavailable, using env vars: %s", e)
+
+
+_load_kv_secrets()
+
 # ── Environment ────────────────────────────────────────────────────────────────
 FOUNDRY_ENDPOINT = (
     os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
