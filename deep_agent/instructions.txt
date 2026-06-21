@@ -1,0 +1,19 @@
+az login
+az account set --subscription "<your-subscription-id-or-name>"
+
+az keyvault secret set \
+  --vault-name rakesh-kv-eastus2 \
+  --name azure-openai54-api-key \
+  --value ""
+
+cd deep_agent
+conda activate foundry_env
+python deploy.py
+
+az ai-agent show --name deep-reasoning-agent --resource-group rg-rakeshvikhar001 --query identity.principalId -o tsv
+
+
+az role assignment create \
+  --role "Key Vault Secrets User" \
+  --assignee <principal-id-from-above> \
+  --scope $(az keyvault show --name rakesh-kv-eastus2 --query id -o tsv)

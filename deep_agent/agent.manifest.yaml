@@ -1,0 +1,37 @@
+# Azure AI Foundry Hosted Agent manifest — Deep Agent
+
+name: deep-reasoning-agent
+description: "Self-contained deep reasoning agent with built-in tools (calculator, date, word-count, request-summarizer)"
+tags:
+  - AI Agent Hosting
+  - Responses Protocol
+  - LangGraph
+  - Deep Reasoning
+
+template:
+  kind: hosted
+  protocol:
+    type: responses
+    version: "1.0.0"
+
+environment:
+  - name: AZURE_OPENAI_ENDPOINT
+    description: Azure OpenAI base URL (e.g. https://<resource>.services.ai.azure.com/openai/v1)
+    required: true
+  - name: AZURE_OPENAI_DEPLOYMENT
+    description: Model deployment name
+    required: true
+  - name: KEY_VAULT_URL
+    description: Key Vault URL the agent's managed identity reads AZURE_OPENAI_API_KEY from
+    required: true
+  - name: KEY_VAULT_SECRET_NAME
+    description: Name of the secret holding the API key (default deep-agent-openai-key)
+    required: false
+  - name: FOUNDRY_PROJECT_ENDPOINT
+    description: Injected automatically by the Foundry platform
+    required: false
+
+resources:
+  model:
+    id: gpt-5.4
+    envVarName: AZURE_OPENAI_DEPLOYMENT
